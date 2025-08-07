@@ -14,13 +14,13 @@ Python ≥ 3.10, Torch ≥ 2.3, Transformers ≥ 4.53, PySceneDetect ≥�
 
 ## Launch examples:
 
-    python3 src/main.py movie.mp4                # automatic
+    python3 src/main.py data/example.mp4                # automatic
 
-    python3 src/main.py movie.mp4 0.25           # threshold 0.25
+    python3 src/main.py data/example.mp4 0.25           # threshold 0.25
 
-    python3 src/main.py movie.mp4 --keep-all     # without duplicate filtering
+    python3 src/main.py data/example.mp4 --keep-all     # without duplicate filtering
 
-    python3 src/main.py movie.mp4 --debug        # detailed log
+    python3 src/main.py data/example.mp4 --debug        # detailed log
 
 ## Arguments:
 
