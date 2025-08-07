@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import pathlib
 import subprocess
 import sys
@@ -31,7 +29,7 @@ def main() -> None:
         print("File not found:", video_path)
         sys.exit(1)
 
-    # ───────── scene detection ─────────
+    # scene detection 
     print(f"\n🚧 Detecting scenes… (threshold = {args.scene_thr})")
     scenes = _detect_scenes(str(video_path), args.scene_thr, args.debug)
 
@@ -50,7 +48,7 @@ def main() -> None:
     else:
         print(f"   Scenes found: {len(scenes)}\n")
 
-    # ───────── captioner ─────────
+    # captioner
     if OFFLINE:
         print("🔌 OFFLINE mode: captioner stub → [stub caption]")
         captioner = lambda img: [{"generated_text": "[stub caption]"}]
@@ -66,7 +64,7 @@ def main() -> None:
         if device != -1 and hasattr(captioner, "device") and str(captioner.device).startswith("cpu"):
             print("⚠️  Model fell back to CPU — possibly insufficient VRAM/RAM.")
 
-    # ───────── iterate scenes ─────────
+    # iterate scenes
     last_caption_norm: str | None = None
     printed_any = False
     extracted_any = False
