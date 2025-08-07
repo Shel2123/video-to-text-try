@@ -1,0 +1,5 @@
+__pycache__
+.pytest_cache
+movie-Scenes.csv
+input.mp4
+movie.mp4
