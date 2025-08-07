@@ -23,6 +23,7 @@ from config import (
     FRAME_EXT
 )
 
+
 def main() -> None:
     args = _parse_args()
     video_path = pathlib.Path(args.video)
