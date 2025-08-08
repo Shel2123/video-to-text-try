@@ -102,7 +102,6 @@ class Describer:
             use_cache=True,
             bad_words_ids=bad_ids
         )
-
         with _torch.inference_mode():
             out_ids = self.model.generate(**inputs, **gen_kwargs)
 
