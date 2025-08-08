@@ -1,106 +1,160 @@
-import pathlib
-import subprocess
-import sys
-import tempfile
-import warnings
+import os
+import math
+import argparse
+from typing import List
 
+import torch as _torch
 from PIL import Image
-from transformers import pipeline
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+from transformers.utils.logging import set_verbosity_error
 
-from utils import (
-    _parse_args,
-    _detect_scenes,
-    _select_device,
-    _sec_to_hhmmss,
-    _grab_frame,
-    _norm
-)
 from config import (
-    DEFAULT_STEP_SEC,
-    OFFLINE,
-    FRAME_EXT
+    MAX_FRAMES_PER_SCENE,
+    TILE,
+    CONTACT_SHEET,
+    USE_FP16,
+    DEFAULT_SCENE_THRESHOLD
+)
+from utils import (
+    to_square_canvas,
+    downscale,
+    make_contact_sheet,
+    detect_scenes,
+    hhmmss,
+    grab_frame,
+    sample_times_uniform
 )
 
+set_verbosity_error()
 
-def main() -> None:
-    args = _parse_args()
-    video_path = pathlib.Path(args.video)
-    if not video_path.is_file():
-        print("File not found:", video_path)
-        sys.exit(1)
+# Recomend of MPS
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-    # scene detection 
-    print(f"\n🚧 Detecting scenes… (threshold = {args.scene_thr})")
-    scenes = _detect_scenes(str(video_path), args.scene_thr, args.debug)
 
-    if not scenes:
-        print("   ⚠️  Detector is silent. Taking frames uniformly…")
-        duration = float(subprocess.check_output(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-            text=True
-        ).strip())
-        scenes = [
-            (t, min(t + DEFAULT_STEP_SEC, duration))
-            for t in range(0, int(duration), DEFAULT_STEP_SEC)
-        ]
-        print(f"   Scenes (uniform): {len(scenes)}\n")
-    else:
-        print(f"   Scenes found: {len(scenes)}\n")
+class Describer:
+    def __init__(self, model_id: str, force_cpu: bool = True, num_threads: int | None = None):
+        # 1) force CPU
+        device = "cpu"
+        if num_threads:
+            _torch.set_num_threads(max(1, num_threads))
+        else:
+            _torch.set_num_threads(max(1, (_os := os).cpu_count() - 1 or 1))
 
-    # captioner
-    if OFFLINE:
-        print("🔌 OFFLINE mode: captioner stub → [stub caption]")
-        captioner = lambda img: [{"generated_text": "[stub caption]"}]
-    else:
-        device = _select_device()
-        captioner = pipeline(
-            "image-to-text",
-            model=args.model,
-            device=device,
-            max_new_tokens=args.max_tokens,
+        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=_torch.float32,
+            low_cpu_mem_usage=True,
+        ).to(device)
+        self.model.eval()
+
+        # fast processor
+        self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+        self.device = device
+
+    def describe_scene(self, frames: list[Image.Image], scene_ts: str) -> str:
+        if not frames:
+            return f"{scene_ts} — (Live) No visual information."
+
+        frames = [to_square_canvas(downscale(f, short=TILE), size=TILE) for f in frames]
+        if CONTACT_SHEET and len(frames) > 1:
+            frames = [to_square_canvas(make_contact_sheet(frames, cols=3, tile=TILE), size=TILE)]
+
+        # short prompt for 2B model
+        messages = [{
+            "role": "user",
+            "content": (
+                [{"type": "image", "image": img} for img in frames] + [
+                    {"type": "text", "text":
+                        "Describe what is happening in the frame in one line in Russian, keeping the key points—e.g., which object is shown or what is taking place."
+                        "Also try to preserve any labels, names, and people’s actions."
+                        "Avoid line breaks."
+                        "At the end, after a comma, you MUST indicate the shot size: wide, medium, or close-up."
+                    }
+                ]
+            )
+        }]
+
+        prompt = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
-        # Just in case, verify we didn't fall back to CPU without warning
-        if device != -1 and hasattr(captioner, "device") and str(captioner.device).startswith("cpu"):
-            print("⚠️  Model fell back to CPU — possibly insufficient VRAM/RAM.")
+        inputs = self.processor(
+            text=prompt,
+            images=frames,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        )
+        inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
 
-    # iterate scenes
-    last_caption_norm: str | None = None
-    printed_any = False
-    extracted_any = False
-    with tempfile.TemporaryDirectory() as tdir:
-        tmp = pathlib.Path(tdir)
-        for idx, (start, end) in enumerate(scenes, 1):
-            mid_ts = (start + end) / 2
-            frame_file = tmp / f"scene_{idx:04d}.{FRAME_EXT}"
-            ok = _grab_frame(str(video_path), mid_ts, frame_file)
-            if not ok:
-                if args.debug:
-                    print("      » frame skipped")
-                caption_raw = "(frame unavailable)"
-            else:
-                extracted_any = True
-                img = Image.open(frame_file).convert("RGB")
-                caption_raw = captioner(img)[0]["generated_text"].strip()
+        # 4) ban for bad words
+        tok = self.processor.tokenizer
+        bad_words = [
+            "system","assistant","user","система","ассистент","помощник",
+            "краткое описание","шаблон","...описание..."
+        ]
+        bad_ids = [tok.encode(w, add_special_tokens=False) for w in bad_words if w]
 
-            caption_norm = _norm(caption_raw)
-            should_print = args.keep_all or caption_norm != last_caption_norm
-            if should_print:
-                print(f"{_sec_to_hhmmss(start)} — (Live) {caption_raw}")
-                last_caption_norm = caption_norm
-                printed_any = True
+        gen_kwargs = dict(
+            max_new_tokens=200,
+            do_sample=True, # !!!
+            temperature=0.7,
+            top_p=0.9,
+            use_cache=True,
+            bad_words_ids=bad_ids
+        )
+        with _torch.inference_mode():
+            out_ids = self.model.generate(**inputs, **gen_kwargs)
 
-            if args.debug:
-                head = caption_raw.replace("\n", " ")[:60]
-                print(f"      » scene {idx} | {head}")
+        # decode only new tokens
+        prefix = inputs["input_ids"].shape[1]
+        new_tokens = out_ids[:, prefix:]
+        text = self.processor.batch_decode(
+            new_tokens, skip_special_tokens=True
+        )[0].strip().splitlines()[0]
 
-    if not extracted_any:
-        print("❌ Failed to extract any frames.", file=sys.stderr)
-        sys.exit(1)
-    if not printed_any:
-        print("00:00:00 — (Live) (no differences between frames)")
+        return f"{scene_ts} — (Live) {text}"
 
+# main flow
+def run(video_path: str,
+        model_id: str = "Qwen/Qwen2-VL-2B-Instruct",
+        threshold: float = 30.0,
+        max_frames_per_scene: int = MAX_FRAMES_PER_SCENE,
+        force_cpu: bool = True) -> List[str]:
+
+    scenes = detect_scenes(video_path, threshold=threshold)
+    desc = Describer(model_id, force_cpu=force_cpu)
+
+    lines: List[str] = []
+    for sc in scenes:
+        ts = hhmmss(sc.start_sec)
+        times = sample_times_uniform(sc.start_sec, sc.end_sec, max_frames=max_frames_per_scene)
+        frames: List[Image.Image] = [im for t in times if (im := grab_frame(video_path, t)) is not None]
+
+        if not frames:
+            line = f"{ts} — (Live) No visual informatio."
+        else:
+            # safety: limit for frames
+            if len(frames) > max_frames_per_scene:
+                step = math.ceil(len(frames) / max_frames_per_scene)
+                frames = frames[::step][:max_frames_per_scene]
+            line = desc.describe_scene(frames, ts)
+
+        print(line, flush=True)   # realtime progress
+        lines.append(line)
+
+    return lines
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("video", type=str)
+    ap.add_argument("--model", type=str, default="Qwen/Qwen2-VL-2B-Instruct")
+    ap.add_argument("--thr", type=float, default=DEFAULT_SCENE_THRESHOLD)
+    ap.add_argument("--max-frames", type=int, default=MAX_FRAMES_PER_SCENE)
+    ap.add_argument("--force-cpu", action="store_true", help="Start on CPU (stable)")
+    args = ap.parse_args()
+
+    run(args.video, model_id=args.model, threshold=args.thr,
+        max_frames_per_scene=args.max_frames, force_cpu=args.force_cpu)
 
 if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=UserWarning)
     main()
