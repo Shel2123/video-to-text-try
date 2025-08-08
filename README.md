@@ -62,7 +62,7 @@ Example output (truncated):
 | Requirement       | Tested version |
 | ----------------- | -------------- |
 | **Python**  | 3.10 – 3.12   |
-| **PyTorch** | 2.3            |
+| **PyTorch** | 2.6            |
 | **ffmpeg**  | ≥ 4.3        |
 
 SceneDescriber relies on `opencv‑python`, `pillow`, `transformers`, `pyscenedetect` and a few utilities.
