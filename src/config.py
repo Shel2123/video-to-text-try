@@ -1,17 +1,15 @@
 import os
 
-# latest
-DEFAULT_SCENE_THRESHOLD = 0.30  # 30 %
-MAX_FRAMES_PER_SCENE = 3       # limit for speed
-CONTACT_SHEET = True           # collage
-TILE = 448                     # base small size
-USE_FP16 = False               # fp16 on GPU/MPS
-PATCH_MULT = 14               # mod for ViT-patch (Qwen2-VL)
+DEFAULT_SCENE_THRESHOLD = 30.0
+MAX_FRAMES_PER_SCENE = 3
+CONTACT_SHEET = False
+TILE = 448
 
+# On CUDA fp16, on MPS/CPU - float32
+USE_FP16 = False
 
-# LEGACY =======================================
-DEFAULT_STEP_SEC = 5     # fallback sampling step
-DEFAULT_MAX_TOKENS = 40
-DEFAULT_MODEL_ID = "nlpconnect/vit-gpt2-image-captioning"
-FRAME_EXT = "png"
-OFFLINE = os.getenv("VSC_OFFLINE") == "1"
+# Apple FastVLM defaults
+DEFAULT_MODEL_ID = os.getenv("FASTVLM_MODEL", "apple/FastVLM-1.5B")
+DEFAULT_MAX_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "128"))
+
+PATCH_MULT = 14
