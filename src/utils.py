@@ -145,7 +145,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="verbose log and progress bar")
     return parser.parse_args()
 
-# device select
 
 def _select_device() -> str | int:
     if torch.cuda.is_available():
@@ -154,7 +153,7 @@ def _select_device() -> str | int:
     if torch.backends.mps.is_available():
         print("🖥  Apple M-series (MPS)")
         return "mps"
-    if hasattr(torch, "xpu") and torch.xpu.is_available():  # Intel GPU
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
         print("🖥  Intel XPU")
         return "xpu"
     print("🖥  CPU")

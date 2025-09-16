@@ -4,3 +4,5 @@ movie-Scenes.csv
 input.mp4
 movie.mp4
 .DS_Store
+data/example2.mp4
+.env
