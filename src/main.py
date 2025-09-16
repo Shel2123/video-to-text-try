@@ -72,7 +72,6 @@ def _get_vision_processor(model) -> object:
             pass
     raise RuntimeError("Не удалось получить image_processor у модели (vision tower).")
 
-# --- Нормализация плана и финальная проверка ---
 SHOT_MAP: dict[str, list[str]] = {
     "wide shot":     ["wide shot", "long shot", "wide", "long", "establishing", "общий план", "общий"],
     "medium shot":   ["medium shot", "medium", "средний план", "средний"],
@@ -84,11 +83,6 @@ BRACKET_PLAN_RE = re.compile(r"\[(.*?)\]")
 LINE_EN_RE = re.compile(r"^\d{2}:\d{2}:\d{2} — \(Live\) .+")
 
 def _extract_shots_and_clean_en(text: str) -> tuple[str, list[str]]:
-    """
-    1) Извлекает планы (ru/en) из [] и из текста.
-    2) Удаляет упоминания планов и служебные обороты.
-    3) Возвращает (краткое_описание, [нормализованные_планы]).
-    """
     shots_found = set()
     def _collect(s: str):
         low = s.lower()
@@ -96,28 +90,23 @@ def _extract_shots_and_clean_en(text: str) -> tuple[str, list[str]]:
             if any(k in low for k in keys):
                 shots_found.add(norm)
 
-    # из квадратных скобок
     for m in BRACKET_PLAN_RE.finditer(text):
         _collect(m.group(1))
     text = BRACKET_PLAN_RE.sub("", text)
 
-    # инлайн
     low = text.lower()
     for norm, keys in SHOT_MAP.items():
         if any(k in low for k in keys):
             shots_found.add(norm)
 
-    # вырезаем сами синонимы из текста
     for keys in SHOT_MAP.values():
         for k in sorted(keys, key=len, reverse=True):
             text = re.sub(rf"\b{re.escape(k)}\b", "", text, flags=re.IGNORECASE)
 
-    # подчистка служебных оборотов и мусора
     text = re.sub(r"\bthe\s+(scene|image)\s+is\s+(an?|of)\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\bshot\s+of\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" \t\r\n.,;:—-")
 
-    # финальный список планов в заданном порядке
     shots = [s for s in SHOT_ORDER if s in shots_found]
     return (text if text else "—"), shots
 
@@ -125,10 +114,6 @@ def _ensure_en_format_or_dash(line: str) -> str:
     return line if LINE_EN_RE.match(line or "") else "-"
 
 class Describer:
-    """
-    Описание сцены через Apple FastVLM (trust_remote_code).
-    """
-
     def __init__(self, model_id: str, force_cpu: bool = False, num_threads: Optional[int] = None):
         if force_cpu:
             self._device = _torch.device("cpu")
@@ -236,13 +221,6 @@ class Describer:
         return px.to(dev, dtype=model_dtype).contiguous()
     
     def _encode_with_image(self, messages: list[dict], pil_image: Image.Image):
-        """
-        Строго по рекомендации Apple FastVLM:
-        1) рендерим шаблон в строку (tokenize=False),
-        2) разделяем по '<image>',
-        3) токенизируем куски без спец. токенов,
-        4) вставляем IMAGE_TOKEN_INDEX (-200) между частями.
-        """
         rendered = self.tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         occ = rendered.count("<image>")
         if occ != 1:
@@ -397,13 +375,11 @@ class Describer:
                     out = _generate_with(px, **relax)
             text = _decode(out)
 
-        # на крайний случай — формально соблюдаем формат
         if not text:
             return "-"
         desc, shots = _extract_shots_and_clean_en(text)
         if desc == "—":
             return "-"
-        # суффикс плана: 1 шт → в скобках, 2+ → через запятую без скобок (как в примере)
         if len(shots) == 1:
             suffix = f" ({shots[0]})"
         elif len(shots) > 1:
