@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import math
 import argparse
 from contextlib import nullcontext
@@ -70,6 +71,58 @@ def _get_vision_processor(model) -> object:
         except Exception:
             pass
     raise RuntimeError("Не удалось получить image_processor у модели (vision tower).")
+
+# --- Нормализация плана и финальная проверка ---
+SHOT_MAP: dict[str, list[str]] = {
+    "wide shot":     ["wide shot", "long shot", "wide", "long", "establishing", "общий план", "общий"],
+    "medium shot":   ["medium shot", "medium", "средний план", "средний"],
+    "close-up":      ["close-up", "close up", "closeup", "cu", "крупный план", "крупный"],
+    "top view":      ["top view", "overhead", "top-down", "top down", "bird's-eye", "birdseye", "bird eye", "вид сверху"],
+}
+SHOT_ORDER = ["top view", "close-up", "medium shot", "wide shot"]  # от наиболее «специфичных»
+BRACKET_PLAN_RE = re.compile(r"\[(.*?)\]")
+LINE_EN_RE = re.compile(r"^\d{2}:\d{2}:\d{2} — \(Live\) .+")
+
+def _extract_shots_and_clean_en(text: str) -> tuple[str, list[str]]:
+    """
+    1) Извлекает планы (ru/en) из [] и из текста.
+    2) Удаляет упоминания планов и служебные обороты.
+    3) Возвращает (краткое_описание, [нормализованные_планы]).
+    """
+    shots_found = set()
+    def _collect(s: str):
+        low = s.lower()
+        for norm, keys in SHOT_MAP.items():
+            if any(k in low for k in keys):
+                shots_found.add(norm)
+
+    # из квадратных скобок
+    for m in BRACKET_PLAN_RE.finditer(text):
+        _collect(m.group(1))
+    text = BRACKET_PLAN_RE.sub("", text)
+
+    # инлайн
+    low = text.lower()
+    for norm, keys in SHOT_MAP.items():
+        if any(k in low for k in keys):
+            shots_found.add(norm)
+
+    # вырезаем сами синонимы из текста
+    for keys in SHOT_MAP.values():
+        for k in sorted(keys, key=len, reverse=True):
+            text = re.sub(rf"\b{re.escape(k)}\b", "", text, flags=re.IGNORECASE)
+
+    # подчистка служебных оборотов и мусора
+    text = re.sub(r"\bthe\s+(scene|image)\s+is\s+(an?|of)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bshot\s+of\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" \t\r\n.,;:—-")
+
+    # финальный список планов в заданном порядке
+    shots = [s for s in SHOT_ORDER if s in shots_found]
+    return (text if text else "—"), shots
+
+def _ensure_en_format_or_dash(line: str) -> str:
+    return line if LINE_EN_RE.match(line or "") else "-"
 
 class Describer:
     """
@@ -223,8 +276,11 @@ class Describer:
             frames = [to_square_canvas(make_contact_sheet(frames, cols=3, tile=TILE), size=TILE)]
         img = frames[0].convert("RGB")
 
-        instruction = "Describe super briefly the scene focusing on salient visual elements. Avoid preambles. At the end, add which shot: long, medium, or close-up."
-        system_prompt = "Always answer in English. Two concise sentences (total 15-30 words), no quotes."
+        instruction = (
+            "Describe the scene very briefly (10–18 words), only salient visual facts. "
+            "End with the shot type: wide shot / medium shot / close-up / top view."
+        )
+        system_prompt = "Always answer in English. No preambles, no quotes."
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": "<image>\n" + instruction},
@@ -343,8 +399,19 @@ class Describer:
 
         # на крайний случай — формально соблюдаем формат
         if not text:
-            text = "содержимое не распознано"
-        return f"{scene_ts} — (Live) {text}"
+            return "-"
+        desc, shots = _extract_shots_and_clean_en(text)
+        if desc == "—":
+            return "-"
+        # суффикс плана: 1 шт → в скобках, 2+ → через запятую без скобок (как в примере)
+        if len(shots) == 1:
+            suffix = f" ({shots[0]})"
+        elif len(shots) > 1:
+            suffix = ", " + ", ".join(shots)
+        else:
+            suffix = ""
+        line = f"{scene_ts} — (Live) {desc}{suffix}"
+        return _ensure_en_format_or_dash(line)
 
 def run(
     video_path: str,
@@ -390,6 +457,7 @@ def run(
                 else:
                     img = to_square_canvas(downscale(frames[0], short=TILE), size=TILE).convert("RGB")
                 line = desc.describe_scene([img], ts)
+                line = _ensure_en_format_or_dash(line)
 
 
             print(line, flush=True)
